@@ -55,8 +55,39 @@ module Samifier
     @@start_codon = 'ATG'
     @@stop_codons = Set.new [ 'TGA', 'TAA', 'TAG' ]
 
-    def initialize(protein_table_file)
+    def initialize(genome_file, protein_table_file)
       @protein_to_oln = protein_to_ordered_locus_name_map(protein_table_file)
+      @genome = load_genome(genome_file)
+    end
+
+    def load_genome(genome_file)
+      genome = {}
+      IO.foreach(genome_file) do |line|
+        (chromosome, source, type, start, stop, score, strand, phase, attributes) = line.split(/\s+/)
+        next if type.nil?
+        type.match(/(CDS|intron)/) do |type_match|
+          seq_type = type_match[1]
+          attributes.match(/Name=([^_]+)_#{seq_type}/) do |attr_match|
+            ordered_locus_name = attr_match[1]
+            next unless @protein_to_oln.has_value?(ordered_locus_name)
+            if !genome.has_key?(ordered_locus_name)
+              genome[ordered_locus_name] = {
+                chromosome: chromosome,
+                direction: strand,
+                locations: []
+              }
+            end
+            genome[ordered_locus_name][:locations] << {
+              type: seq_type,
+              start: start.to_i,
+              stop: stop.to_i,
+              direction: strand
+            }
+          end
+        end
+      end
+      genome.each { |k,v| v[:locations].sort!{|a,b| a[:start] <=> b[:start]} }
+      genome
     end
 
     def parse_mascot_search_results(search_results_file)
@@ -90,8 +121,8 @@ module Samifier
               protein: protein,
               id: "#{protein}.#{id}",
               peptide: peptide,
-              start: m[2],
-              stop: m[3]
+              start: m[2].to_i,
+              stop: m[3].to_i
             }
           end
         end
@@ -108,42 +139,44 @@ module Samifier
       protein_map
     end
 
-    def get_sequence_locations(genome_file, protein)
-      sequence_locations = {
-        chromosome: nil,
-        locations: []
-      }
+    def get_sequence_locations(protein)
       ordered_locus_name = @protein_to_oln[protein]
-      IO.foreach(genome_file) do |line|
-        (chromosome, db, type, start, stop, a, b, c, desc) = line.split(/\s+/)
-        next if type.nil?
-        type.match(/(CDS|intron)/) do |m|
-          seq_type = m[1]
-          if desc =~ /Name=#{ordered_locus_name}_#{seq_type}/
-            sequence_locations[:chromosome] = chromosome
-            sequence_locations[:locations] << {
-              type: seq_type,
-              start: start.to_i,
-              stop: stop.to_i
-            }
-          end
-        end
-      end
-      sequence_locations[:locations].sort!{|a,b| a[:start] <=> b[:start]}
-      sequence_locations
+      @genome[ordered_locus_name]
     end
 
-    def roll_cigar(sequences)
+    def get_peptide_sequence(peptide, seq_parts)
+      part_seq = ''
       cigar = ''
-      sequences.each do |seq|
-        cigar << case seq[:type]
-          when 'CDS' then
-            "#{seq[:stop]-seq[:start]+1}M"
-          when 'intron' then
-            "#{seq[:stop]-seq[:start]+1}N"
+      peptide_start = (peptide[:start] - 1) * 3
+      peptide_stop = peptide[:stop] * 3 - 1
+
+      seq_parts.each do |part|
+        if part[:type] == 'intron'
+          cigar << "#{part[:stop]-part[:start]+1}N" unless cigar.empty?
+          next
         end
-      end 
-      cigar
+
+        seq_size = part[:sequence].size
+        if peptide_start >= seq_size 
+          peptide_start -= seq_size
+          peptide_stop -= seq_size
+          next
+        end
+
+        if peptide_stop < seq_size
+          part_seq << part[:sequence][peptide_start..peptide_stop]
+          cigar << "#{peptide_stop-peptide_start+1}M"
+          break
+        else
+          part_seq << part[:sequence][peptide_start..seq_size-1]
+          cigar << "#{seq_size-peptide_start}M"
+          peptide_start = 0
+        end
+      end
+      {
+        sequence: part_seq,
+        cigar: cigar
+      }
     end
 
     def to_sam_entry(name, sequence_parts)
