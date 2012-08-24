@@ -1,0 +1,45 @@
+#!/usr/bin/env ruby
+require 'samifier'
+require 'optparse'
+require 'ostruct'
+
+options = OpenStruct.new
+begin
+  OptionParser.new do |opts|
+    opts.banner = "Usage: samifier -m mascot_search_results.txt -a accession_table.txt -c chomosome_directory -o output.sam"
+
+    opts.on("-m", "--mascot_file MASCOT",
+              "A Mascot search results file in txt format") do |m|
+      options.mascot_file = m
+    end
+
+    opts.on("-a", "--accession_file ACCESSION_FILE",
+              "Accession file mapping identifier to ordered locus name") do |a|
+      options.accession_file = a
+    end
+
+    opts.on("-c", "--chromosomes_directory CHROMOSOMES_DIRECTORY",
+              "Directory containing the chromosome files in FASTA format for the given genome") do |c|
+      options.chromosomes_dir = c
+    end
+
+    opts.on("-g", "--genome_file GENOME_FILE",
+              "Genome file in gff format") do |g|
+      options.genome_file = g
+    end
+
+    opts.on("-o", "--output_file OUTPUT_FILE",
+              "Filename that the SAM format file will be written to") do |out|
+      options.output_file = out
+    end
+  end.parse!
+rescue OptionParser::InvalidOption, OptionParser::MissingArgument
+    puts $!.to_s
+    puts optparse
+    exit    
+end
+
+
+@samifier = Samifier::Base.new(options.genome_file, options.accession_file)
+@samifier.to_sam_file(options.mascot_file, options.chromosomes_dir, options.output_file)
+

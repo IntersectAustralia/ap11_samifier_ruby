@@ -63,26 +63,34 @@ module Samifier
     def load_genome(genome_file)
       genome = {}
       IO.foreach(genome_file) do |line|
+        next if line =~ /^\#/
         (chromosome, source, type, start, stop, score, strand, phase, attributes) = line.split(/\s+/)
         next if type.nil?
-        type.match(/(CDS|intron)/) do |type_match|
+        type.match(/(gene|CDS|intron)/) do |type_match|
           seq_type = type_match[1]
-          attributes.match(/Name=([^_]+)_#{seq_type}/) do |attr_match|
-            ordered_locus_name = attr_match[1]
-            next unless @protein_to_oln.has_value?(ordered_locus_name)
-            if !genome.has_key?(ordered_locus_name)
-              genome[ordered_locus_name] = {
-                chromosome: chromosome,
-                direction: strand,
-                locations: []
+          if seq_type == 'gene'
+            attributes.match(/ID=(.+?);/) do |attr_match|
+              ordered_locus_name = attr_match[1]
+              if !genome.has_key?(ordered_locus_name)
+                genome[ordered_locus_name] = {
+                  chromosome: chromosome,
+                  start: start.to_i,
+                  direction: strand,
+                  locations: []
+                }
+              end
+            end
+          else
+            attributes.match(/Name=([^_]+)_#{seq_type}/) do |attr_match|
+              ordered_locus_name = attr_match[1]
+              next unless @protein_to_oln.has_value?(ordered_locus_name)
+              genome[ordered_locus_name][:locations] << {
+                type: seq_type,
+                start: start.to_i,
+                stop: stop.to_i,
+                direction: strand
               }
             end
-            genome[ordered_locus_name][:locations] << {
-              type: seq_type,
-              start: start.to_i,
-              stop: stop.to_i,
-              direction: strand
-            }
           end
         end
       end
@@ -149,6 +157,7 @@ module Samifier
       cigar = ''
       peptide_start = (peptide[:start] - 1) * 3
       peptide_stop = peptide[:stop] * 3 - 1
+      remaining = peptide_stop - peptide_start + 1
 
       seq_parts.each do |part|
         if part[:type] == 'intron'
@@ -157,19 +166,21 @@ module Samifier
         end
 
         seq_size = part[:sequence].size
+
         if peptide_start >= seq_size 
           peptide_start -= seq_size
-          peptide_stop -= seq_size
+          #peptide_stop -= seq_size
           next
         end
 
-        if peptide_stop < seq_size
-          part_seq << part[:sequence][peptide_start..peptide_stop]
-          cigar << "#{peptide_stop-peptide_start+1}M"
+        if (peptide_start + remaining) < seq_size
+          part_seq << part[:sequence][peptide_start, remaining]
+          cigar << "#{remaining}M"
           break
         else
           part_seq << part[:sequence][peptide_start..seq_size-1]
           cigar << "#{seq_size-peptide_start}M"
+          remaining -= (seq_size - peptide_start)
           peptide_start = 0
         end
       end
@@ -179,19 +190,39 @@ module Samifier
       }
     end
 
-    def to_sam_entry(name, sequence_parts)
-      qname = name
+    def to_sam_entry(qname, rname, pos, cigar, peptide_sequence)
       flag = 0
-      rname = sequence_parts[:TODO]
-      pos = sequence_parts.first[:start]
       mapq = 255
-      cigar = roll_cigar(sequence_parts)
       rnext = '='
       pnext = 0
       tlen = 0
-      seq = nucleotide_sequence(sequence_parts)
       qual = '*'
-      [qname, flag, rname, pos, mapq, cigar, rnext, pnext, tlen, seq, qual].join("\t")
+      [qname, flag, rname, pos, mapq, cigar, rnext, pnext, tlen, peptide_sequence, qual]
+    end
+
+    def to_sam_file(mascot_results_file, chromosome_dir, outfile)
+      results = parse_mascot_search_results(mascot_results_file)
+      sam_entries = []
+      results.each do |result|
+        next unless result[:protein] == 'RL36A_YEAST'
+        protein_location = get_sequence_locations(result[:protein])
+        if protein_location.nil?
+          $stderr.puts "#{result[:protein]} not found in #{genome_file}"
+          next
+        end
+        # Directionality supported in a future release
+        next unless protein_location[:direction] == '+'
+        seq_parts = extract_sequence_parts(chromosome_dir, protein_location)
+
+        peptide_sequence = get_peptide_sequence(result, seq_parts)
+        protein_name = result[:protein]
+        peptide_start = result[:start] + @genome[@protein_to_oln[protein_name]][:start]
+        sam_entries << to_sam_entry(result[:id], protein_location[:chromosome], peptide_start, peptide_sequence[:cigar], peptide_sequence[:sequence])
+      end
+      sam_file = File.open(outfile, 'w')
+      sam_entries.sort{|a,b| a[3] <=> b[3]}.each do |sam_entry|
+        sam_file.puts sam_entry.join("\t")
+      end
     end
 
     def nucleotide_sequence(sequence_parts)
@@ -199,7 +230,6 @@ module Samifier
     end
 
     def extract_sequence_parts(chromosome_dir, protein_location)
-      # {:chromosome=>"chrV", :locations=>[{:type=>"CDS", :start=>545611, :stop=>546414}]}
       nucleotide_sequence_parts = []
       read_stop = 0
 
