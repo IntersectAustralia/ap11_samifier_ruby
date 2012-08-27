@@ -169,7 +169,6 @@ module Samifier
 
         if peptide_start >= seq_size 
           peptide_start -= seq_size
-          #peptide_stop -= seq_size
           next
         end
 
@@ -202,15 +201,15 @@ module Samifier
 
     def to_sam_file(mascot_results_file, chromosome_dir, outfile)
       results = parse_mascot_search_results(mascot_results_file)
+      output_files = {}
       sam_entries = []
       results.each do |result|
-        next unless result[:protein] == 'RL36A_YEAST'
         protein_location = get_sequence_locations(result[:protein])
         if protein_location.nil?
-          $stderr.puts "#{result[:protein]} not found in #{genome_file}"
+          $stderr.puts "#{result[:protein]} not found in genome file"
           next
         end
-        # Directionality supported in a future release
+        # TODO: Directionality supported in a future release
         next unless protein_location[:direction] == '+'
         seq_parts = extract_sequence_parts(chromosome_dir, protein_location)
 
@@ -219,10 +218,12 @@ module Samifier
         peptide_start = result[:start] + @genome[@protein_to_oln[protein_name]][:start]
         sam_entries << to_sam_entry(result[:id], protein_location[:chromosome], peptide_start, peptide_sequence[:cigar], peptide_sequence[:sequence])
       end
-      sam_file = File.open(outfile, 'w')
-      sam_entries.sort{|a,b| a[3] <=> b[3]}.each do |sam_entry|
-        sam_file.puts sam_entry.join("\t")
+      sam_entries.sort_by!{|e| [e[2],e[3]]}.each do |sam_entry|
+        chromosome = sam_entry[2]
+        output_files[chromosome] ||= File.open("#{outfile}.#{chromosome}.sam", 'w')
+        output_files[chromosome].puts sam_entry.join("\t")
       end
+      output_files.values(&:close)
     end
 
     def nucleotide_sequence(sequence_parts)
@@ -283,6 +284,7 @@ module Samifier
           stop: stop_index
         }
       end
+      file.close
       nucleotide_sequence_parts
     end
 
