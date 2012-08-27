@@ -288,7 +288,7 @@ module Samifier
       nucleotide_sequence_parts
     end
 
-    def nucleotide_to_amino_acid_sequence(nucleotide_seq, line_length=60)
+    def self.nucleotide_to_amino_acid_sequence(nucleotide_seq)
       aminos = ''
       count = 0
       seq_io = StringIO.new(nucleotide_seq)
@@ -296,7 +296,6 @@ module Samifier
         if @@codons.has_key?(codon.to_sym)
           count += 1
           aminos << @@codons[codon.to_sym]
-          aminos << "\n" if count % line_length == 0
         else
           $stderr.puts "codon #{codon} not found" unless @@stop_codons.include?(codon)
         end

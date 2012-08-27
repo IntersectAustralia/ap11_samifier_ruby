@@ -1,0 +1,4 @@
+#!/usr/bin/env ruby
+require 'samifier'
+
+puts Samifier::Base::nucleotide_to_amino_acid_sequence(ARGV[0])
