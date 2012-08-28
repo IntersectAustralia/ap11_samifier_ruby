@@ -60,44 +60,6 @@ module Samifier
       @genome = load_genome(genome_file)
     end
 
-    def load_genome(genome_file)
-      genome = {}
-      IO.foreach(genome_file) do |line|
-        next if line =~ /^\#/
-        (chromosome, source, type, start, stop, score, strand, phase, attributes) = line.split(/\s+/)
-        next if type.nil?
-        type.match(/(gene|CDS|intron)/) do |type_match|
-          seq_type = type_match[1]
-          if seq_type == 'gene'
-            attributes.match(/ID=(.+?);/) do |attr_match|
-              ordered_locus_name = attr_match[1]
-              if !genome.has_key?(ordered_locus_name)
-                genome[ordered_locus_name] = {
-                  chromosome: chromosome,
-                  start: start.to_i,
-                  direction: strand,
-                  locations: []
-                }
-              end
-            end
-          else
-            attributes.match(/Name=([^_]+)_#{seq_type}/) do |attr_match|
-              ordered_locus_name = attr_match[1]
-              next unless @protein_to_oln.has_value?(ordered_locus_name)
-              genome[ordered_locus_name][:locations] << {
-                type: seq_type,
-                start: start.to_i,
-                stop: stop.to_i,
-                direction: strand
-              }
-            end
-          end
-        end
-      end
-      genome.each { |k,v| v[:locations].sort!{|a,b| a[:start] <=> b[:start]} }
-      genome
-    end
-
     def parse_mascot_search_results(search_results_file)
       peptides_start = false
       results = []
@@ -110,32 +72,6 @@ module Samifier
         end
       end
       results.flatten!
-    end
-
-    def get_proteins_from_query(line)
-      results_list = []
-      line.match(/^(q\d+_p\d+)=([^;]+)\;(.+)$/) do |m|
-        id = m[1]
-        peptide_part= m[2]
-        proteins_part = m[3]
-        parts = peptide_part.split(/,/)
-        peptide = parts[4]
-        proteins_part.split(/,/).each do |protein_part|
-          # "14311_ARATH":0:192:197:1
-          protein_part.match(/^"([^"]+)":\d:(\d+):(\d+):\d/) do |m|
-            protein = m[1]
-            next unless @protein_to_oln.has_key?(protein)
-            results_list << {
-              protein: protein,
-              id: "#{protein}.#{id}",
-              peptide: peptide,
-              start: m[2].to_i,
-              stop: m[3].to_i
-            }
-          end
-        end
-      end
-      results_list
     end
 
     def protein_to_ordered_locus_name_map(protein_table_file)
@@ -153,7 +89,7 @@ module Samifier
     end
 
     def get_peptide_sequence(peptide, seq_parts)
-      part_seq = ''
+      nucleotide_seq = ''
       cigar = ''
       peptide_start = (peptide[:start] - 1) * 3
       peptide_stop = peptide[:stop] * 3 - 1
@@ -173,35 +109,24 @@ module Samifier
         end
 
         if (peptide_start + remaining) < seq_size
-          part_seq << part[:sequence][peptide_start, remaining]
+          nucleotide_seq << part[:sequence][peptide_start, remaining]
           cigar << "#{remaining}M"
           break
         else
-          part_seq << part[:sequence][peptide_start..seq_size-1]
+          nucleotide_seq << part[:sequence][peptide_start..seq_size-1]
           cigar << "#{seq_size-peptide_start}M"
           remaining -= (seq_size - peptide_start)
           peptide_start = 0
         end
       end
       {
-        sequence: part_seq,
+        sequence: nucleotide_seq,
         cigar: cigar
       }
     end
 
-    def to_sam_entry(qname, rname, pos, cigar, peptide_sequence)
-      flag = 0
-      mapq = 255
-      rnext = '='
-      pnext = 0
-      tlen = 0
-      qual = '*'
-      [qname, flag, rname, pos, mapq, cigar, rnext, pnext, tlen, peptide_sequence, qual]
-    end
-
     def to_sam_file(mascot_results_file, chromosome_dir, outfile)
       results = parse_mascot_search_results(mascot_results_file)
-      output_files = {}
       sam_entries = []
       results.each do |result|
         protein_location = get_sequence_locations(result[:protein])
@@ -215,15 +140,20 @@ module Samifier
 
         peptide_sequence = get_peptide_sequence(result, seq_parts)
         protein_name = result[:protein]
-        peptide_start = result[:start] + @genome[@protein_to_oln[protein_name]][:start]
+        peptide_start = (result[:start]-1)*3 + @genome[@protein_to_oln[protein_name]][:start]
         sam_entries << to_sam_entry(result[:id], protein_location[:chromosome], peptide_start, peptide_sequence[:cigar], peptide_sequence[:sequence])
       end
+      prev_chromosome = nil
+      output_file = File.open("#{outfile}.sam", 'w')
       sam_entries.sort_by!{|e| [e[2],e[3]]}.each do |sam_entry|
         chromosome = sam_entry[2]
-        output_files[chromosome] ||= File.open("#{outfile}.#{chromosome}.sam", 'w')
-        output_files[chromosome].puts sam_entry.join("\t")
+        if prev_chromosome != chromosome
+          sam_entry[6] = '='
+          prev_chromosome = chromosome
+        end
+        output_file.puts sam_entry.join("\t")
       end
-      output_files.values(&:close)
+      output_file.close
     end
 
     def nucleotide_sequence(sequence_parts)
@@ -238,6 +168,7 @@ module Samifier
       locations = protein_location[:locations]
       chromosome_file = File.join(chromosome_dir, chromosome + ".fa")
       file = File.open(chromosome_file)
+      raise "Could not open #{chromosome_file}" if file.nil?
       file.readline # Skip header line
       read_cursor = 0
       line = nil
@@ -301,6 +232,86 @@ module Samifier
         end
       end
       aminos
+    end
+
+    private
+
+    def load_genome(genome_file)
+      genome = {}
+      IO.foreach(genome_file) do |line|
+        next if line =~ /^\#/
+        (chromosome, source, type, start, stop, score, strand, phase, attributes) = line.split(/\s+/)
+        next if type.nil?
+        type.match(/(gene|CDS|intron)/) do |type_match|
+          seq_type = type_match[1]
+          if seq_type == 'gene'
+            attributes.match(/ID=(.+?);/) do |attr_match|
+              ordered_locus_name = attr_match[1]
+              if !genome.has_key?(ordered_locus_name)
+                genome[ordered_locus_name] = {
+                  chromosome: chromosome,
+                  start: start.to_i,
+                  direction: strand,
+                  locations: []
+                }
+              end
+            end
+          else
+            attributes.match(/Name=([^_;]+)[_;]/) do |attr_match|
+              ordered_locus_name = attr_match[1]
+              next unless @protein_to_oln.has_value?(ordered_locus_name)
+              genome[ordered_locus_name][:locations] << {
+                type: seq_type,
+                start: start.to_i,
+                stop: stop.to_i,
+                direction: strand
+              }
+            end
+          end
+        end
+      end
+      genome.each { |k,v| v[:locations].sort!{|a,b| a[:start] <=> b[:start]} }
+      genome
+    end
+
+    def sam_sequence_dictionary(chromosome)
+      parts = ['@SQ', "SN:#{name}", "LN:#{size}"]
+    end
+
+    def to_sam_entry(qname, rname, pos, cigar, peptide_sequence)
+      flag = 0
+      mapq = 255
+      rnext = '*'
+      pnext = 0
+      tlen = 0
+      qual = '*'
+      [qname, flag, rname, pos, mapq, cigar, rnext, pnext, tlen, peptide_sequence, qual]
+    end
+
+    def get_proteins_from_query(line)
+      results_list = []
+      line.match(/^(q\d+_p\d+)=([^;]+)\;(.+)$/) do |m|
+        id = m[1]
+        peptide_part= m[2]
+        proteins_part = m[3]
+        parts = peptide_part.split(/,/)
+        peptide = parts[4]
+        proteins_part.split(/,/).each do |protein_part|
+          # "14311_ARATH":0:192:197:1
+          protein_part.match(/^"([^"]+)":\d:(\d+):(\d+):\d/) do |m|
+            protein = m[1]
+            next unless @protein_to_oln.has_key?(protein)
+            results_list << {
+              protein: protein,
+              id: "#{protein}.#{id}",
+              peptide: peptide,
+              start: m[2].to_i,
+              stop: m[3].to_i
+            }
+          end
+        end
+      end
+      results_list
     end
 
   end
