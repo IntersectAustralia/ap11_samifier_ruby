@@ -1,6 +1,6 @@
 # Samifier
 
-TODO: Write a gem description
+NOTE: this is no longer in use, see [https://github.com/IntersectAustralia/ap11_samifier](https://github.com/IntersectAustralia/ap11_samifier)
 
 ## Installation
 
